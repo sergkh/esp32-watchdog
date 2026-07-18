@@ -132,6 +132,75 @@ button {
 }
 
 button:hover { background: #1d4ed8; }
+
+.config-panel {
+  margin-top: 18px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+details {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fafbff;
+}
+
+summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 10px 12px;
+  font-weight: 600;
+}
+
+summary::-webkit-details-marker { display: none; }
+
+.config-content {
+  border-top: 1px solid var(--line);
+  padding: 12px;
+}
+
+.config-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.config-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.config-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.config-row input {
+  width: 120px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.config-toggle input {
+  width: auto;
+}
+
+.config-note {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.config-status {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
 </style>
 </head>
 <body>
@@ -164,11 +233,45 @@ button:hover { background: #1d4ed8; }
   <span>Now</span>
 </div>
 <br/><button onclick="forceReboot()">Force Reboot</button>
+
+<div class="config-panel">
+  <details>
+    <summary>Config</summary>
+    <div class="config-content">
+      <p class="config-note">Update watchdog behavior using JSON config endpoint.</p>
+      <div class="config-row">
+        <div class="config-field">
+          <label for="restartDelayMinutes">Restart delay (minutes)</label>
+          <input id="restartDelayMinutes" type="number" min="0" step="1" value="3">
+        </div>
+        <div class="config-field">
+          <label for="noSuccessPingTimeMinutes">No successful ping time (minutes)</label>
+          <input id="noSuccessPingTimeMinutes" type="number" min="0" step="1" value="5">
+        </div>
+        <div class="config-field">
+          <label for="minFailedPings">Min failed pings</label>
+          <input id="minFailedPings" type="number" min="1" step="1" value="10">
+        </div>
+        <div class="config-toggle">
+          <input id="autoRestartEnabled" type="checkbox" checked>
+          <label for="autoRestartEnabled">Enable auto-restart</label>
+        </div>
+        <button onclick="saveConfig()">Save Config</button>
+      </div>
+      <div id="configStatus" class="config-status">Not loaded yet.</div>
+    </div>
+  </details>
+</div>
 </div>
 </div>
 
 <script>
 let fetching = false;
+let savingConfig = false;
+
+function setConfigStatus(text) {
+  document.getElementById("configStatus").innerText = text;
+}
 
 function formatDaysHoursFromMs(ms) {
   const totalSeconds = Math.floor(parseInt(ms) / 1000);
@@ -281,15 +384,124 @@ async function refresh() {
     document.getElementById("lastRestart").innerText = data.lastRestart != '0' ? formatDaysHoursFromMs(data.lastRestart) + " ago" : "Never";
     document.getElementById("uptime").innerText = formatDaysHoursFromMs(data.uptime);
     renderTimeline(data.history, data.bucketMs, data.uptime);
+
+    const config = data.config || {};
+    const restartDelayInput = document.getElementById("restartDelayMinutes");
+    const noSuccessInput = document.getElementById("noSuccessPingTimeMinutes");
+    const minFailedPingsInput = document.getElementById("minFailedPings");
+    const autoRestartEnabledInput = document.getElementById("autoRestartEnabled");
+    if (typeof config.restartDelayMinutes !== "undefined" && document.activeElement !== restartDelayInput && !savingConfig) {
+      restartDelayInput.value = config.restartDelayMinutes;
+    }
+    if (typeof config.noSuccessPingTimeMinutes !== "undefined" && document.activeElement !== noSuccessInput && !savingConfig) {
+      noSuccessInput.value = config.noSuccessPingTimeMinutes;
+    }
+    if (typeof config.minFailedPings !== "undefined" && document.activeElement !== minFailedPingsInput && !savingConfig) {
+      minFailedPingsInput.value = config.minFailedPings;
+    }
+    if (typeof config.autoRestartEnabled !== "undefined" && !savingConfig) {
+      autoRestartEnabledInput.checked = !!config.autoRestartEnabled;
+    }
+
+    if (typeof config.restartDelayMinutes !== "undefined" &&
+        typeof config.noSuccessPingTimeMinutes !== "undefined" &&
+        typeof config.minFailedPings !== "undefined" &&
+        typeof config.autoRestartEnabled !== "undefined") {
+      setConfigStatus(
+        "Current config: restart delay " + config.restartDelayMinutes +
+        "m, no-success ping " + config.noSuccessPingTimeMinutes +
+        "m, min failed pings " + config.minFailedPings +
+        ", auto-restart " + (config.autoRestartEnabled ? "enabled" : "disabled")
+      );
+    }
   } finally {
     fetching = false;
   }
 }
 
 async function forceReboot() {
-  const response = await fetch("/reboot", { method: "POST" });
-  const data = await response.json();
-  console.log("Reboot forced.");
+  await fetch("/reboot", { method: "POST" });
+  console.log("Reboot forced");
+}
+
+async function saveConfig() {
+  if (savingConfig) return;
+
+  const restartDelayMinutesRaw = document.getElementById("restartDelayMinutes").value;
+  const restartDelayMinutes = parseInt(restartDelayMinutesRaw, 10);
+  const noSuccessPingTimeMinutesRaw = document.getElementById("noSuccessPingTimeMinutes").value;
+  const noSuccessPingTimeMinutes = parseInt(noSuccessPingTimeMinutesRaw, 10);
+  const minFailedPingsRaw = document.getElementById("minFailedPings").value;
+  const minFailedPings = parseInt(minFailedPingsRaw, 10);
+  const autoRestartEnabled = document.getElementById("autoRestartEnabled").checked;
+  if (Number.isNaN(restartDelayMinutes) || restartDelayMinutes < 0) {
+    setConfigStatus("Invalid value. Please use 0 or higher.");
+    return;
+  }
+  if (Number.isNaN(noSuccessPingTimeMinutes) || noSuccessPingTimeMinutes < 0) {
+    setConfigStatus("Invalid no-success ping time. Please use 0 or higher.");
+    return;
+  }
+  if (Number.isNaN(minFailedPings) || minFailedPings < 1) {
+    setConfigStatus("Invalid min failed pings. Please use 1 or higher.");
+    return;
+  }
+
+  savingConfig = true;
+  setConfigStatus("Saving...");
+
+  try {
+    const response = await fetch("/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        restartDelayMinutes: restartDelayMinutes,
+        noSuccessPingTimeMinutes: noSuccessPingTimeMinutes,
+        minFailedPings: minFailedPings,
+        autoRestartEnabled: autoRestartEnabled
+      })
+    });
+
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || "Failed to save config");
+    }
+
+    const updatedMinutes = data.config && data.config.restartDelayMinutes;
+    const updatedNoSuccessMinutes = data.config && data.config.noSuccessPingTimeMinutes;
+    const updatedMinFailedPings = data.config && data.config.minFailedPings;
+    const updatedAutoRestartEnabled = data.config && data.config.autoRestartEnabled;
+    if (typeof updatedMinutes !== "undefined") {
+      document.getElementById("restartDelayMinutes").value = updatedMinutes;
+    }
+    if (typeof updatedNoSuccessMinutes !== "undefined") {
+      document.getElementById("noSuccessPingTimeMinutes").value = updatedNoSuccessMinutes;
+    }
+    if (typeof updatedMinFailedPings !== "undefined") {
+      document.getElementById("minFailedPings").value = updatedMinFailedPings;
+    }
+    if (typeof updatedAutoRestartEnabled !== "undefined") {
+      document.getElementById("autoRestartEnabled").checked = !!updatedAutoRestartEnabled;
+    }
+
+    if (typeof updatedMinutes !== "undefined" &&
+        typeof updatedNoSuccessMinutes !== "undefined" &&
+        typeof updatedMinFailedPings !== "undefined" &&
+        typeof updatedAutoRestartEnabled !== "undefined") {
+      setConfigStatus(
+        "Saved. Restart delay: " + updatedMinutes +
+        "m, no-success ping time: " + updatedNoSuccessMinutes +
+        "m, min failed pings: " + updatedMinFailedPings +
+        ", auto-restart: " + (updatedAutoRestartEnabled ? "enabled" : "disabled") + "."
+      );
+    } else {
+      setConfigStatus("Saved.");
+    }
+  } catch (error) {
+    setConfigStatus("Save failed: " + error.message);
+  } finally {
+    savingConfig = false;
+  }
 }
 
 setInterval(refresh, 3000);

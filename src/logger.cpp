@@ -1,4 +1,4 @@
-#include "app_logger.h"
+#include "logger.h"
 
 #include <HTTPClient.h>
 #include <WiFi.h>
@@ -59,7 +59,7 @@ void sendToBetterStack(const char* level, const String& message) {
   HTTPClient https;
   String ingestUrl = buildIngestUrl();
   if (!https.begin(client, ingestUrl)) {
-    Serial.println("[WARN] Better Stack connection init failed.");
+    // Ignore remote logging failures and keep local Serial logging only.
     return;
   }
 
@@ -87,10 +87,8 @@ void sendToBetterStack(const char* level, const String& message) {
   int code = https.POST(payload);
   https.end();
 
-  if (code != 200 && code != 202) {
-    Serial.print("[WARN] Better Stack rejected log, code=");
-    Serial.println(code);
-  }
+  // Ignore non-success response codes. Serial logging already happened.
+  (void)code;
 }
 
 void logWithLevel(const char* level, const String& message) {

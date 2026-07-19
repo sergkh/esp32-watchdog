@@ -186,6 +186,10 @@ summary::-webkit-details-marker { display: none; }
   border-radius: 8px;
 }
 
+#monitoredHost {
+  width: 220px;
+}
+
 .config-toggle input {
   width: auto;
 }
@@ -251,6 +255,10 @@ summary::-webkit-details-marker { display: none; }
         <div class="config-field">
           <label for="minFailedPings">Min failed pings</label>
           <input id="minFailedPings" type="number" min="1" step="1" value="10">
+        </div>
+        <div class="config-field">
+          <label for="monitoredHost">Monitored host</label>
+          <input id="monitoredHost" type="text" value="192.168.1.2">
         </div>
         <div class="config-toggle">
           <input id="autoRestartEnabled" type="checkbox" checked>
@@ -389,6 +397,7 @@ async function refresh() {
     const restartDelayInput = document.getElementById("restartDelayMinutes");
     const noSuccessInput = document.getElementById("noSuccessPingTimeMinutes");
     const minFailedPingsInput = document.getElementById("minFailedPings");
+    const monitoredHostInput = document.getElementById("monitoredHost");
     const autoRestartEnabledInput = document.getElementById("autoRestartEnabled");
     if (typeof config.restartDelayMinutes !== "undefined" && document.activeElement !== restartDelayInput && !savingConfig) {
       restartDelayInput.value = config.restartDelayMinutes;
@@ -399,6 +408,9 @@ async function refresh() {
     if (typeof config.minFailedPings !== "undefined" && document.activeElement !== minFailedPingsInput && !savingConfig) {
       minFailedPingsInput.value = config.minFailedPings;
     }
+    if (typeof config.monitoredHost !== "undefined" && document.activeElement !== monitoredHostInput && !savingConfig) {
+      monitoredHostInput.value = config.monitoredHost;
+    }
     if (typeof config.autoRestartEnabled !== "undefined" && !savingConfig) {
       autoRestartEnabledInput.checked = !!config.autoRestartEnabled;
     }
@@ -406,11 +418,13 @@ async function refresh() {
     if (typeof config.restartDelayMinutes !== "undefined" &&
         typeof config.noSuccessPingTimeMinutes !== "undefined" &&
         typeof config.minFailedPings !== "undefined" &&
+        typeof config.monitoredHost !== "undefined" &&
         typeof config.autoRestartEnabled !== "undefined") {
       setConfigStatus(
         "Current config: restart delay " + config.restartDelayMinutes +
         "m, no-success ping " + config.noSuccessPingTimeMinutes +
         "m, min failed pings " + config.minFailedPings +
+        ", monitored host " + config.monitoredHost +
         ", auto-restart " + (config.autoRestartEnabled ? "enabled" : "disabled")
       );
     }
@@ -433,6 +447,7 @@ async function saveConfig() {
   const noSuccessPingTimeMinutes = parseInt(noSuccessPingTimeMinutesRaw, 10);
   const minFailedPingsRaw = document.getElementById("minFailedPings").value;
   const minFailedPings = parseInt(minFailedPingsRaw, 10);
+  const monitoredHost = document.getElementById("monitoredHost").value.trim();
   const autoRestartEnabled = document.getElementById("autoRestartEnabled").checked;
   if (Number.isNaN(restartDelayMinutes) || restartDelayMinutes < 0) {
     setConfigStatus("Invalid value. Please use 0 or higher.");
@@ -444,6 +459,10 @@ async function saveConfig() {
   }
   if (Number.isNaN(minFailedPings) || minFailedPings < 1) {
     setConfigStatus("Invalid min failed pings. Please use 1 or higher.");
+    return;
+  }
+  if (!monitoredHost) {
+    setConfigStatus("Invalid monitored host. Please enter host or IP.");
     return;
   }
 
@@ -458,6 +477,7 @@ async function saveConfig() {
         restartDelayMinutes: restartDelayMinutes,
         noSuccessPingTimeMinutes: noSuccessPingTimeMinutes,
         minFailedPings: minFailedPings,
+        monitoredHost: monitoredHost,
         autoRestartEnabled: autoRestartEnabled
       })
     });
@@ -470,6 +490,7 @@ async function saveConfig() {
     const updatedMinutes = data.config && data.config.restartDelayMinutes;
     const updatedNoSuccessMinutes = data.config && data.config.noSuccessPingTimeMinutes;
     const updatedMinFailedPings = data.config && data.config.minFailedPings;
+    const updatedMonitoredHost = data.config && data.config.monitoredHost;
     const updatedAutoRestartEnabled = data.config && data.config.autoRestartEnabled;
     if (typeof updatedMinutes !== "undefined") {
       document.getElementById("restartDelayMinutes").value = updatedMinutes;
@@ -480,6 +501,9 @@ async function saveConfig() {
     if (typeof updatedMinFailedPings !== "undefined") {
       document.getElementById("minFailedPings").value = updatedMinFailedPings;
     }
+    if (typeof updatedMonitoredHost !== "undefined") {
+      document.getElementById("monitoredHost").value = updatedMonitoredHost;
+    }
     if (typeof updatedAutoRestartEnabled !== "undefined") {
       document.getElementById("autoRestartEnabled").checked = !!updatedAutoRestartEnabled;
     }
@@ -487,11 +511,13 @@ async function saveConfig() {
     if (typeof updatedMinutes !== "undefined" &&
         typeof updatedNoSuccessMinutes !== "undefined" &&
         typeof updatedMinFailedPings !== "undefined" &&
+        typeof updatedMonitoredHost !== "undefined" &&
         typeof updatedAutoRestartEnabled !== "undefined") {
       setConfigStatus(
         "Saved. Restart delay: " + updatedMinutes +
         "m, no-success ping time: " + updatedNoSuccessMinutes +
         "m, min failed pings: " + updatedMinFailedPings +
+        ", monitored host: " + updatedMonitoredHost +
         ", auto-restart: " + (updatedAutoRestartEnabled ? "enabled" : "disabled") + "."
       );
     } else {

@@ -4,11 +4,20 @@
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <Preferences.h>
-#include <ctype.h>
 #include <string.h>
 #include "esp_sleep.h"
 #include "secrets.h"
 #include "web_page.h"
+#include "json_utils.h"
+#include "app_logger.h"
+
+#ifndef BETTERSTACK_INGESTING_HOST
+#define BETTERSTACK_INGESTING_HOST ""
+#endif
+
+#ifndef BETTERSTACK_SOURCE_TOKEN
+#define BETTERSTACK_SOURCE_TOKEN ""
+#endif
 
 const uint32_t sleepTime = 20000; // 20 seconds
 const uint32_t historyBucketMs = 10UL * 60UL * 1000UL; // 10 minutes
@@ -28,10 +37,12 @@ const char* configRestartDelayMsKey = "restartDelayMs";
 const char* configNoSuccessPingTimeMsKey = "noSuccessPingTimeMs";
 const char* configMinFailedPingsKey = "minFailedPings";
 const char* configAutoRestartEnabledKey = "autoRestartEnabled";
+const char* configMonitoredHostKey = "monitoredHost";
+const size_t maxMonitoredHostLength = 255;
 
 const char* ssid = WIFI_SSID;
 const char* password = WIFI_PASSWORD;
-const char* watchdogHost = MONITORED_HOST; // TODO: add watchdog IP/host
+const char* defaultMonitoredHost = MONITORED_HOST;
 const int PIN = 14;
 
 struct DeviceStatus {
@@ -47,6 +58,7 @@ struct AppConfig {
   uint32_t noSuccessPingTimeMs = defaultNoSuccessPingTimeMs;
   uint32_t minFailedPings = defaultMinFailedPings;
   bool autoRestartEnabled = defaultAutoRestartEnabled;
+  String monitoredHost = defaultMonitoredHost;
 };
 
 enum HistoryEventFlag : uint8_t {
@@ -108,6 +120,18 @@ uint32_t noSuccessMinutesToMs(uint32_t minutes) {
   return minutes * 60000UL;
 }
 
+String sanitizeMonitoredHost(const String& value) {
+  String sanitized = value;
+  sanitized.trim();
+  if (sanitized.length() == 0) {
+    return String(defaultMonitoredHost);
+  }
+  if (sanitized.length() > maxMonitoredHostLength) {
+    sanitized = sanitized.substring(0, maxMonitoredHostLength);
+  }
+  return sanitized;
+}
+
 uint32_t getRestartDelayMs() {
   xSemaphoreTake(configMutex, portMAX_DELAY);
   uint32_t delay = config.restartDelayMs;
@@ -136,12 +160,20 @@ bool getAutoRestartEnabled() {
   return value;
 }
 
+String getMonitoredHost() {
+  xSemaphoreTake(configMutex, portMAX_DELAY);
+  String value = config.monitoredHost;
+  xSemaphoreGive(configMutex);
+  return value;
+}
+
 void loadConfig() {
   preferences.begin(configNamespace, true);
   uint32_t storedRestartDelayMs = preferences.getULong(configRestartDelayMsKey, defaultRestartDelayMs);
   uint32_t storedNoSuccessPingTimeMs = preferences.getULong(configNoSuccessPingTimeMsKey, defaultNoSuccessPingTimeMs);
   uint32_t storedMinFailedPings = preferences.getULong(configMinFailedPingsKey, defaultMinFailedPings);
   bool storedAutoRestartEnabled = preferences.getBool(configAutoRestartEnabledKey, defaultAutoRestartEnabled);
+  String storedMonitoredHost = preferences.getString(configMonitoredHostKey, defaultMonitoredHost);
   preferences.end();
 
   xSemaphoreTake(configMutex, portMAX_DELAY);
@@ -149,6 +181,7 @@ void loadConfig() {
   config.noSuccessPingTimeMs = clampNoSuccessPingTimeMs(storedNoSuccessPingTimeMs);
   config.minFailedPings = clampMinFailedPings(storedMinFailedPings);
   config.autoRestartEnabled = storedAutoRestartEnabled;
+  config.monitoredHost = sanitizeMonitoredHost(storedMonitoredHost);
   xSemaphoreGive(configMutex);
 }
 
@@ -158,6 +191,7 @@ void saveConfig() {
   uint32_t noSuccessPingTimeMs = config.noSuccessPingTimeMs;
   uint32_t minFailedPings = config.minFailedPings;
   bool autoRestartEnabled = config.autoRestartEnabled;
+  String monitoredHost = config.monitoredHost;
   xSemaphoreGive(configMutex);
 
   preferences.begin(configNamespace, false);
@@ -165,16 +199,18 @@ void saveConfig() {
   preferences.putULong(configNoSuccessPingTimeMsKey, noSuccessPingTimeMs);
   preferences.putULong(configMinFailedPingsKey, minFailedPings);
   preferences.putBool(configAutoRestartEnabledKey, autoRestartEnabled);
+  preferences.putString(configMonitoredHostKey, monitoredHost);
   preferences.end();
 }
 
 void updateConfig(uint32_t restartDelayMs, uint32_t noSuccessPingTimeMs, uint32_t minFailedPings,
-                  bool autoRestartEnabled) {
+                  bool autoRestartEnabled, const String& monitoredHost) {
   xSemaphoreTake(configMutex, portMAX_DELAY);
   config.restartDelayMs = clampRestartDelayMs(restartDelayMs);
   config.noSuccessPingTimeMs = clampNoSuccessPingTimeMs(noSuccessPingTimeMs);
   config.minFailedPings = clampMinFailedPings(minFailedPings);
   config.autoRestartEnabled = autoRestartEnabled;
+  config.monitoredHost = sanitizeMonitoredHost(monitoredHost);
   xSemaphoreGive(configMutex);
   saveConfig();
 }
@@ -184,6 +220,7 @@ String configJson() {
   uint32_t noSuccessPingTimeMs = getNoSuccessPingTimeMs();
   uint32_t minFailedPings = getMinFailedPings();
   bool autoRestartEnabled = getAutoRestartEnabled();
+  String monitoredHost = getMonitoredHost();
   String json = "{";
   json += "\"restartDelayMs\":";
   json += String(restartDelayMs);
@@ -202,108 +239,12 @@ String configJson() {
   json += ",";
   json += "\"autoRestartEnabled\":";
   json += autoRestartEnabled ? "true" : "false";
+  json += ",";
+  json += "\"monitoredHost\":\"";
+  json += escapeJsonString(monitoredHost);
+  json += "\"";
   json += "}";
   return json;
-}
-
-bool parseJsonUint32Field(const String& body, const char* key, uint32_t* outValue) {
-  String needle = "\"" + String(key) + "\"";
-  int keyPos = body.indexOf(needle);
-  if (keyPos < 0) {
-    return false;
-  }
-
-  int colonPos = body.indexOf(':', keyPos + needle.length());
-  if (colonPos < 0) {
-    return false;
-  }
-
-  int i = colonPos + 1;
-  while (i < body.length() && isspace(static_cast<unsigned char>(body[i]))) {
-    i++;
-  }
-
-  bool quoted = false;
-  if (i < body.length() && body[i] == '"') {
-    quoted = true;
-    i++;
-  }
-
-  if (i >= body.length() || !isdigit(static_cast<unsigned char>(body[i]))) {
-    return false;
-  }
-
-  uint64_t value = 0;
-  while (i < body.length() && isdigit(static_cast<unsigned char>(body[i]))) {
-    value = value * 10 + static_cast<uint64_t>(body[i] - '0');
-    if (value > UINT32_MAX) {
-      return false;
-    }
-    i++;
-  }
-
-  if (quoted) {
-    if (i >= body.length() || body[i] != '"') {
-      return false;
-    }
-  }
-
-  *outValue = static_cast<uint32_t>(value);
-  return true;
-}
-
-bool parseJsonBoolField(const String& body, const char* key, bool* outValue) {
-  String needle = "\"" + String(key) + "\"";
-  int keyPos = body.indexOf(needle);
-  if (keyPos < 0) {
-    return false;
-  }
-
-  int colonPos = body.indexOf(':', keyPos + needle.length());
-  if (colonPos < 0) {
-    return false;
-  }
-
-  int i = colonPos + 1;
-  while (i < body.length() && isspace(static_cast<unsigned char>(body[i]))) {
-    i++;
-  }
-
-  bool quoted = false;
-  if (i < body.length() && body[i] == '"') {
-    quoted = true;
-    i++;
-  }
-
-  if (i + 4 <= body.length() && body.substring(i, i + 4) == "true") {
-    i += 4;
-    if (quoted) {
-      if (i >= body.length() || body[i] != '"') {
-        return false;
-      }
-    } else if (i < body.length() && body[i] != ',' && body[i] != '}' &&
-               !isspace(static_cast<unsigned char>(body[i]))) {
-      return false;
-    }
-    *outValue = true;
-    return true;
-  }
-
-  if (i + 5 <= body.length() && body.substring(i, i + 5) == "false") {
-    i += 5;
-    if (quoted) {
-      if (i >= body.length() || body[i] != '"') {
-        return false;
-      }
-    } else if (i < body.length() && body[i] != ',' && body[i] != '}' &&
-               !isspace(static_cast<unsigned char>(body[i]))) {
-      return false;
-    }
-    *outValue = false;
-    return true;
-  }
-
-  return false;
 }
 
 void advanceHistoryToNowLocked(ulong now) {
@@ -344,7 +285,7 @@ bool ensureWifiConnected() {
     return true;
   }
 
-  Serial.println("WiFi disconnected, attempting reconnect...");
+  logWarn("WiFi disconnected, attempting reconnect...");
 
   WiFi.mode(WIFI_STA);
 
@@ -358,17 +299,14 @@ bool ensureWifiConnected() {
   ulong reconnectStart = millis();
   while (WiFi.status() != WL_CONNECTED && (millis() - reconnectStart) < wifiReconnectTimeoutMs) {
     vTaskDelay(pdMS_TO_TICKS(wifiReconnectStepMs));
-    Serial.print("~");
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWiFi reconnected");
-    Serial.print("IP address: ");
-    Serial.println(WiFi.localIP());
+    logInfo("WiFi reconnected, IP address: " + WiFi.localIP().toString());
     return true;
   }
 
-  Serial.println("\nWiFi reconnect failed, skipping ping check.");
+  logWarn("WiFi reconnect failed, skipping ping check.");
   markHistoryEvent(millis(), HISTORY_WIFI_FAILED);
   return false;
 }
@@ -376,7 +314,7 @@ bool ensureWifiConnected() {
 void forceReboot() {
   uint32_t restartDelayMs = getRestartDelayMs();
 
-  Serial.println("Forcing reboot...");
+  logWarn("Forcing reboot...");
   
   digitalWrite(PIN, HIGH);
   delay(4000);
@@ -391,7 +329,7 @@ void forceReboot() {
 
   markHistoryEvent(millis(), HISTORY_RESTART);
 
-  Serial.println("Reboot forced.");
+  logWarn("Reboot forced.");
 }
 
 void runCheck() {
@@ -419,13 +357,13 @@ void runCheck() {
     return;
   }
 
-  Serial.print("Pinging ");
-  Serial.println(watchdogHost);
+  String monitoredHost = getMonitoredHost();
+  logInfo("Pinging " + monitoredHost);
 
-  bool ok = Ping.ping(watchdogHost, 5);
+  bool ok = Ping.ping(monitoredHost.c_str(), 5);
   
   if (ok) {
-    Serial.println("Ping OK");
+    logInfo("Ping OK");
     xSemaphoreTake(statusMutex, portMAX_DELAY);
     status.status = "OK";
     status.lastUpdate = millis();
@@ -434,7 +372,7 @@ void runCheck() {
     xSemaphoreGive(statusMutex);
     markHistoryEvent(millis(), HISTORY_OK);
   } else {
-    Serial.println("Ping FAILED");
+    logWarn("Ping FAILED");
     
     xSemaphoreTake(statusMutex, portMAX_DELAY);
     status.status = "FAILED";
@@ -454,11 +392,11 @@ void runCheck() {
     bool restartDelayPassed = millis() - lastRestart > restartDelayMs;
 
     if (noSuccessTooLong && restartDelayPassed && failedPings >= minFailedPings && autoRestartEnabled) {
-      Serial.println("No successful ping for too long, forcing reboot.");
+      logWarn("No successful ping for too long, forcing reboot.");
       forceReboot();
     } else if (noSuccessTooLong && restartDelayPassed && failedPings >= minFailedPings &&
                !autoRestartEnabled) {
-      Serial.println("Auto-restart disabled, skipping reboot.");
+      logWarn("Auto-restart disabled, skipping reboot.");
     }
   }
 }
@@ -467,18 +405,18 @@ void wifiConnect() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
 
-  Serial.print("Version 0.1");
+  logInfo("Version 0.1 booting");
 
   int timeout = 100;
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
-    Serial.print(".");    
-    if (timeout-- <= 0) ESP.restart();
+    if (timeout-- <= 0) {
+      logError("WiFi connect timeout, restarting ESP.");
+      ESP.restart();
+    }
   }
 
-  Serial.println("\nWiFi connected");
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
+  logInfo("WiFi connected, IP address: " + WiFi.localIP().toString());
 }
 
 
@@ -494,6 +432,7 @@ void pollingTask(void *parameter)
 
 void setup() {
   Serial.begin(115200);
+  initAppLogger(BETTERSTACK_INGESTING_HOST, BETTERSTACK_SOURCE_TOKEN, "esp32-watchdog");
   pinMode(PIN, OUTPUT);
   digitalWrite(PIN, LOW);
   
@@ -545,6 +484,7 @@ void setup() {
         uint32_t noSuccessPingTimeMinutes = 0;
         uint32_t minFailedPings = 0;
         bool autoRestartEnabled = false;
+        String monitoredHost;
         bool hasRestartDelayMs = parseJsonUint32Field(*body, "restartDelayMs", &restartDelayMs);
         bool hasRestartDelayMinutes = parseJsonUint32Field(*body, "restartDelayMinutes", &restartDelayMinutes);
         bool hasNoSuccessPingTimeMs = parseJsonUint32Field(*body, "noSuccessPingTimeMs", &noSuccessPingTimeMs);
@@ -553,12 +493,14 @@ void setup() {
         bool hasMinFailedPings = parseJsonUint32Field(*body, "minFailedPings", &minFailedPings);
         bool hasAutoRestartEnabled =
             parseJsonBoolField(*body, "autoRestartEnabled", &autoRestartEnabled);
+        bool hasMonitoredHost = parseJsonStringField(*body, "monitoredHost", &monitoredHost);
 
         delete body;
         request->_tempObject = nullptr;
 
         if (!hasRestartDelayMs && !hasRestartDelayMinutes && !hasNoSuccessPingTimeMs &&
-            !hasNoSuccessPingTimeMinutes && !hasMinFailedPings && !hasAutoRestartEnabled) {
+            !hasNoSuccessPingTimeMinutes && !hasMinFailedPings && !hasAutoRestartEnabled &&
+            !hasMonitoredHost) {
           request->send(400, "application/json",
                         "{\"ok\":false,\"error\":\"Missing config fields\"}");
           return;
@@ -568,6 +510,7 @@ void setup() {
         uint32_t nextNoSuccessPingTimeMs = getNoSuccessPingTimeMs();
         uint32_t nextMinFailedPings = getMinFailedPings();
         bool nextAutoRestartEnabled = getAutoRestartEnabled();
+        String nextMonitoredHost = getMonitoredHost();
 
         if (hasRestartDelayMinutes || hasRestartDelayMs) {
           nextRestartDelayMs = hasRestartDelayMinutes
@@ -589,6 +532,10 @@ void setup() {
           nextAutoRestartEnabled = autoRestartEnabled;
         }
 
+        if (hasMonitoredHost) {
+          nextMonitoredHost = sanitizeMonitoredHost(monitoredHost);
+        }
+
         if (hasRestartDelayMs && hasRestartDelayMinutes) {
           uint32_t fromMinutes = minutesToMs(restartDelayMinutes);
           if (fromMinutes != clampRestartDelayMs(restartDelayMs)) {
@@ -608,7 +555,7 @@ void setup() {
         }
 
         updateConfig(nextRestartDelayMs, nextNoSuccessPingTimeMs, nextMinFailedPings,
-                     nextAutoRestartEnabled);
+                     nextAutoRestartEnabled, nextMonitoredHost);
 
         String response = "{";
         response += "\"ok\":true,";
